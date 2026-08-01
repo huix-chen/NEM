@@ -36,6 +36,12 @@ mpl.rcParams.update({
 
 
 def clean_axes(ax, keep_bottom=True):
+    """去掉图表的上/右/左边框, 只留浅色网格线, 让图表看起来更干净 (consulting 风格)。
+
+    参数:
+        ax: matplotlib 的坐标轴对象
+        keep_bottom: 是否保留底部边框, 默认保留
+    """
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_visible(False)

@@ -64,7 +64,21 @@ A demand-indexed, plant-specific model should improve forecast accuracy exactly 
 - **Policy calibration.** Set Market Price Cap and Cumulative Price Threshold levels against realistic bidding behavior, not an averaged fiction.
 - **Retirement readiness.** A model that already separates Eraring from Bayswater can answer what happens to the 5-6pm window once Eraring exits, without a rebuild.
 
-**This is Phase 1: diagnosis and mechanism, not yet a validated forecasting tool.** Phase 2 is a backtest against a historical date where the Market Price Cap or Cumulative Price Threshold was actually adjusted, freezing the model beforehand and checking whether it predicts the right direction. That step would turn this into a validated tool and quantify the improvement in dollar terms.
+**This is Phase 1: diagnosis and mechanism.** The backtest below is Phase 2.
+
+## 5. Phase 2: Backtest
+
+The plan was to validate against a real AEMO Market Price Cap or Cumulative Price Threshold event. NSW1 has triggered Administered Pricing only once, May 8 to 15, 2024, and that window sits inside the exact gap where AEMO's bid archive has no data. No bid data exists to test against it.
+
+Instead we ran a leave-one-month-out backtest on 23 independent real months (Aug 2024 to Jun 2026). Each month is held out in turn while the rest train the model. Two models, both fit on demand-binned average bid price, are compared: one curve per unit versus one curve pooled across all four units.
+
+Results across 92 held-out unit-months:
+- Direction (price rising or falling with demand) matched the held-out month 93% of the time.
+- The pooled curve did worse than just predicting the training-period average price (R² -0.12).
+- The plant-specific curve beat that baseline (R² 0.12) and cut prediction error 11% versus the pooled curve.
+- The gain was small for Bayswater (about 4%) and large for Eraring (15-25%). Pooling lets Bayswater's bigger swings distort Eraring's curve.
+
+This supports keeping Bayswater and Eraring separate. It does not mean demand alone predicts price well: it explains only about 12% of the variance. Reproduce with `fetch_monthly_bids.py` then `backtest_holdout.py`.
 
 ---
 
@@ -82,7 +96,7 @@ All figures come from real AEMO data pulled via [NEMOSIS](https://github.com/UNS
 
 **Units analyzed:** BW01, BW02 (Bayswater), ER01, ER02 (Eraring), the four largest coal DUIDs in NSW1.
 
-**Data availability:** `BIDDAYOFFER_D`/`BIDPEROFFER_D` are missing from AEMO's archive between March 2021 and July 2024. Real 2023 bid data doesn't exist, so the three bidding-behavior windows are drawn from May 2025, August 2024, and November 2025 instead, chosen to span calm, tight, and duck-curve conditions. Exhibit 1 uses 2023 demand/price data directly, which has no such gap.
+**Data availability:** `BIDDAYOFFER_D`/`BIDPEROFFER_D` are missing from AEMO's archive between March 2021 and July 2024. Real 2023 bid data doesn't exist, so the bidding-behavior analysis and backtest use real months from August 2024 onward instead. Exhibit 1 uses 2023 demand/price data directly, which has no such gap.
 
 **Per-interval reconstruction:** `BIDPEROFFER_D` restates every remaining interval each time a unit rebids intraday, so a naive join keeps superseded rows. We keep only the most recent rebid actually in effect (`OFFERDATE <= INTERVAL_DATETIME`, latest wins) before computing each unit's weighted-average bid price per interval.
 
@@ -95,9 +109,11 @@ merge_bid_bands.py            # Merge BIDDAYOFFER_D + BIDPEROFFER_D into a full 
 find_real_spike_days.py       # Scan 2024-08 onward for genuine NSW1 price-spike days
 scarcity_curve.py             # Core analysis: real bid price vs. real reserve margin / demand
 make_exhibits.py              # Generates exhibit1/2/3 PNGs used in this README
+fetch_monthly_bids.py         # Phase 2: pull every available real month for the backtest
+backtest_holdout.py           # Phase 2: leave-one-month-out backtest, plant-specific vs. pooled curve
 nsw1_2023.csv                 # 2023 NSW1 half-hourly demand & price
 duid_generator_registry.csv   # AEMO generator registration list
-nemosis_cache/                # Cached NEMOSIS downloads (feather format, gitignored, several GB)
+nemosis_cache/                # Cached NEMOSIS downloads + parquet outputs, gitignored, several GB
 ```
 
-**To reproduce:** `pip install nemosis pandas numpy matplotlib`, run `fetch_real_bids_nemosis.py` once to populate the cache, then `scarcity_curve.py <window_label>` (`sustained_2024aug` or `duckcurve_2025nov`), then `make_exhibits.py` to regenerate the charts. `nemosis_cache/` is not tracked in git (see `.gitignore`): it's several GB of raw AEMO downloads and rebuilds locally on first run.
+**To reproduce:** `pip install nemosis pandas numpy pyarrow matplotlib`. Run `fetch_real_bids_nemosis.py` once to populate the cache, then `scarcity_curve.py <window_label>` (`sustained_2024aug` or `duckcurve_2025nov`), then `make_exhibits.py` for the charts. For the backtest, run `fetch_monthly_bids.py` to pull all available real months, then `backtest_holdout.py`. `nemosis_cache/` is not tracked in git (see `.gitignore`): it holds raw AEMO downloads and rebuilds locally on first run.
