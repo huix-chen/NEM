@@ -1,34 +1,34 @@
 """
-诊断:RRP尖峰(>$1000/MWh)在2023年NSW1的时间分布
-输入:nsw1_2023.csv (SETTLEMENTDATE, TOTALDEMAND, RRP 等列)
+Counts NSW1 RRP spikes (>$1000/MWh) in 2023 and breaks them down by month and hour.
+Input: nsw1_2023.csv (SETTLEMENTDATE, TOTALDEMAND, RRP, ...).
 """
 import pandas as pd
 
 df = pd.read_csv("nsw1_2023.csv", parse_dates=["SETTLEMENTDATE"])
 
-SPIKE_THRESHOLD = 1000  # $/MWh, 可以自己改成 5000 看更极端的情况
+SPIKE_THRESHOLD = 1000  # $/MWh, raise to e.g. 5000 to look at more extreme events
 
 spikes = df[df["RRP"] > SPIKE_THRESHOLD].copy()
 spikes["month"] = spikes["SETTLEMENTDATE"].dt.month
 spikes["hour"] = spikes["SETTLEMENTDATE"].dt.hour
 
-print(f"总尖峰次数 (RRP > ${SPIKE_THRESHOLD}/MWh): {len(spikes)}")
+print(f"Total spikes (RRP > ${SPIKE_THRESHOLD}/MWh): {len(spikes)}")
 print()
 
-print("按月份分布:")
+print("By month:")
 print(spikes["month"].value_counts().sort_index().to_string())
 print()
 
-print("按小时分布:")
+print("By hour:")
 print(spikes["hour"].value_counts().sort_index().to_string())
 print()
 
-print("尖峰时段 vs 全年 平均需求对比:")
-print(f"  尖峰时段平均需求: {spikes['TOTALDEMAND'].mean():.1f} MW")
-print(f"  全年平均需求:     {df['TOTALDEMAND'].mean():.1f} MW")
-print(f"  全年最高需求:     {df['TOTALDEMAND'].max():.1f} MW")
+print("Spike-period demand vs. annual demand:")
+print(f"  Average demand during spikes: {spikes['TOTALDEMAND'].mean():.1f} MW")
+print(f"  Annual average demand:        {df['TOTALDEMAND'].mean():.1f} MW")
+print(f"  Annual peak demand:           {df['TOTALDEMAND'].max():.1f} MW")
 
-# 可选:画图（需要 matplotlib）
+# Optional chart (needs matplotlib)
 try:
     import matplotlib.pyplot as plt
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
@@ -40,6 +40,6 @@ try:
     axes[1].set_xlabel("Hour of day")
     plt.tight_layout()
     plt.savefig("spike_time_distribution.png", dpi=130)
-    print("\n图已保存: spike_time_distribution.png")
+    print("\nSaved: spike_time_distribution.png")
 except ImportError:
     pass

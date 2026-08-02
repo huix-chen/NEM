@@ -1,64 +1,63 @@
 """
-本地运行模板 —— 用 NEMOSIS 抓取真实机组报价 (BIDDAYOFFER_D / BIDPEROFFER_D)
-和真实机组出力 (DISPATCH_UNIT_SCADA)。
+Template for pulling real generator bids (BIDDAYOFFER_D / BIDPEROFFER_D) and real
+generator output (DISPATCH_UNIT_SCADA) via NEMOSIS.
 
-⚠️ 这份代码需要你在自己电脑上跑，不能在这个 sandbox 里跑，
-   因为这里的网络白名单不包含 nemweb.com.au / aemo.com.au。
+Requires network access to nemweb.com.au / aemo.com.au, so it must run on a local
+machine, not in this sandbox (whose network allowlist excludes both).
 
-安装:
+Install:
     pip install nemosis
 
-坑提醒:
-    1. BIDDAYOFFER_D / BIDPEROFFER_D 这两张表在 2021-03 到 2024-07 之间有缺失
-       （NEMOSIS 官方 README 里写的），选时间窗口时要避开或者绕开这段。
-    2. Bid 表体积很大（一个月 zip 压缩后 0.5-1.5GB），第一次跑强烈建议只选
-       几天到最多一个月，不要一上来就拉一整年。
-    3. 第一次跑会把原始 zip 下载到 raw_data_cache 目录并转成 parquet 缓存，
-       之后同一时间段再跑会直接读缓存，不会重新下载。
+Notes:
+    - BIDDAYOFFER_D / BIDPEROFFER_D are missing from AEMO's archive between
+      2021-03 and 2024-07 (a known NEMOSIS issue). Pick a window outside that gap.
+    - Bid tables are large (0.5-1.5GB compressed per month). Start with a few days
+      to a month, not a full year.
+    - The first run downloads the raw zip into raw_data_cache and converts it to
+      a parquet cache; later runs for the same period read straight from cache.
 """
 from nemosis import dynamic_data_compiler
 
-# ---------- 基本设置 ----------
-RAW_DATA_CACHE = "./nemosis_cache"   # 缓存目录，自己改成本地任意路径
-START_TIME = "2025/05/01 00:00:00"   # 建议先挑你诊断出来尖峰最多的月份 (5月)
-END_TIME = "2025/05/08 00:00:00"     # 先只拉一周，跑通了再扩大范围
-# 注意: BIDDAYOFFER_D / BIDPEROFFER_D 在 2021-03 ~ 2024-07 之间缺失 (NEMOSIS 官方已知问题)，
-# 选时间窗口时必须避开这段，否则会报 NoDataToReturn。
+# ---------- Config ----------
+RAW_DATA_CACHE = "./nemosis_cache"   # change to any local path
+START_TIME = "2025/05/01 00:00:00"   # start with the month with the most spikes (May)
+END_TIME = "2025/05/08 00:00:00"     # one week first, widen once it works
+# BIDDAYOFFER_D / BIDPEROFFER_D are missing between 2021-03 and 2024-07 (known
+# NEMOSIS issue). Pick a window outside that gap or you'll get NoDataToReturn.
 
-# 挑几台真实机组来看 (来自我们之前找到的 NSW1 真实 DUID)
-PEAKER_DUIDS = ["ER01", "ER02", "BW01", "BW02"]  # 换成你想研究的 DUID 列表
+# The four units under study (NSW1 coal, Bayswater + Eraring)
+PEAKER_DUIDS = ["ER01", "ER02", "BW01", "BW02"]
 
-# ---------- 1. 拉真实报价数据 (机组愿意卖多少钱) ----------
-# BIDDAYOFFER_D: 每台机组每天的价格阶梯 (10档价格band)
+# ---------- 1. Real bid data (what each unit is willing to sell for) ----------
+# BIDDAYOFFER_D: 10-band daily price ladder per DUID
 bid_price_bands = dynamic_data_compiler(
     START_TIME, END_TIME, "BIDDAYOFFER_D", RAW_DATA_CACHE,
     filter_cols=["DUID"], filter_values=(PEAKER_DUIDS,),
 )
-print("报价价格档 (BIDDAYOFFER_D) 样例:")
+print("BIDDAYOFFER_D sample:")
 print(bid_price_bands.head())
 
-# BIDPEROFFER_D: 每台机组每个5分钟interval，每档价格对应能卖多少MW
+# BIDPEROFFER_D: MW available per band per DUID per 5-minute interval
 bid_volume_bands = dynamic_data_compiler(
     START_TIME, END_TIME, "BIDPEROFFER_D", RAW_DATA_CACHE,
     filter_cols=["DUID"], filter_values=(PEAKER_DUIDS,),
 )
-print("\n报价数量档 (BIDPEROFFER_D) 样例:")
+print("\nBIDPEROFFER_D sample:")
 print(bid_volume_bands.head())
 
-# ---------- 2. 拉真实出力数据 (机组实际发了多少电) ----------
+# ---------- 2. Real output data (what each unit actually generated) ----------
 unit_scada = dynamic_data_compiler(
     START_TIME, END_TIME, "DISPATCH_UNIT_SCADA", RAW_DATA_CACHE,
     filter_cols=["DUID"], filter_values=(PEAKER_DUIDS,),
 )
-print("\n真实出力 (DISPATCH_UNIT_SCADA) 样例:")
+print("\nDISPATCH_UNIT_SCADA sample:")
 print(unit_scada.head())
 
-# ---------- 3. 这些数据接下来怎么用（思路，不是完整代码） ----------
-# a) 把 bid_price_bands + bid_volume_bands 按 DUID + interval 合并，
-#    重建出每台机组每个5分钟的完整报价阶梯（10档价格 x 10档数量）。
-# b) 把这个报价阶梯，跟同一时间的系统 reserve margin（可以从你已有的
-#    nsw1_2023.csv 算出来）对齐，就能看到「备用容量越紧张，这台机组
-#    报价占比越高」这条真实曲线长什么样 —— 这条曲线就是用来替代
-#    nem_mvp.py 里那个手编的 alpha 公式的真实校准依据。
-# c) unit_scada 则是用来验证「这台机组真的被叫起来发电了吗，
-#    发了多少」，可以拿来对比你 ABM 模拟出来的 dispatch 结果对不对得上。
+# ---------- 3. What this data feeds into next ----------
+# a) Merge bid_price_bands + bid_volume_bands on DUID + interval to reconstruct
+#    each unit's full 5-minute bid ladder (10 price bands x 10 volume bands).
+# b) Join that ladder to system reserve margin (derivable from nsw1_2023.csv)
+#    to see the real "tighter reserve margin -> more volume at high price bands"
+#    curve, which replaces the hand-tuned alpha formula in nem_mvp.py.
+# c) unit_scada checks whether a unit was actually dispatched and how much, for
+#    comparison against ABM-simulated dispatch results.

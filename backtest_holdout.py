@@ -1,26 +1,33 @@
 """
-Phase 2 起点: 留出法 (leave-one-window-out) 回测 scarcity_curve.py 的核心结论 ——
-"分机组、按需求指数化的报价曲线" 是否真的比 "一条通用稀缺曲线套所有机组" 预测得更准。
+Phase 2: leave-one-window-out backtest of scarcity_curve.py's core claim, that a
+plant-specific, demand-indexed bidding curve predicts better than one generic
+curve pooled across all four units.
 
-背景: README 原计划是拿一个真实的 AEMO MPC/CPT 触发事件 (2024-05-08~15 NSW1
-Administered Pricing) 做回测, 但那次事件正好落在 AEMO 报价数据缺失区间
-(2021-03~2024-07) 里, 完全没有 BIDDAYOFFER_D/BIDPEROFFER_D 数据, 没法验证。
-退而求其次: 用已有的三个真实窗口 (May 2025 / Aug 2024 / Nov 2025) 做
-留一法交叉验证 —— 每次用两个窗口拟合模型, 在没见过的第三个窗口上检验预测效果。
-这不是文档里设想的"针对真实监管事件"的回测, 但同样是严格的样本外 (out-of-sample) 检验。
+Background: the original plan was to validate against a real AEMO MPC/CPT event
+(the 2024-05-08~15 NSW1 Administered Pricing period), but that window falls
+inside the gap where AEMO's bid archive has no BIDDAYOFFER_D/BIDPEROFFER_D data,
+so it can't be tested. Instead this runs leave-one-window-out cross-validation
+over every real window scarcity_curve.py has produced: each window is held out
+in turn while the rest train the model. Not the regulatory-event backtest the
+README originally described, but still a strict out-of-sample test.
 
-对比两个模型 (都只用 TOTALDEMAND 一个变量, 训练/测试严格分离):
-  Model A "plant-specific": 每台 DUID 单独按需求分箱取均价 (非参数, 能画出非单调曲线)
-  Model B "pooled naive"  : 四台机组数据混在一起分箱取均价
-                            (对应 README 想替换掉的"通用稀缺 alpha"做法)
-  Baseline "constant"     : 直接预测训练集里该 DUID 的历史均价 (最起码的对照组)
+Two models are compared (both use TOTALDEMAND only, trained and tested on
+disjoint data):
+  Model A "plant-specific": one demand-binned average price curve per DUID
+                             (non-parametric, can capture a non-monotonic shape)
+  Model B "pooled naive":   one demand-binned average price curve across all
+                             four units (the generic "scarcity alpha" approach
+                             the README argues against)
+  Baseline "constant":      predict the DUID's training-period average price
 
-第一版用的是直线拟合 (price = a + b*demand), 但 README Exhibit 2 里 BW01 的真实行为
-是非单调的 (真高峰报地板价, 中等需求反而报高价, 形状更像倒U型), 直线完全抓不住这种
-折返, 会系统性低估 plant-specific 曲线的价值。这版换成按需求分箱取均价的非参数模型
-(regime-based), 不假设任何函数形状, 能直接体现这种自保式报价。
+An earlier version used a straight-line fit (price = a + b*demand). README
+Exhibit 2 shows BW01's real behavior is non-monotonic (bids at the floor at the
+actual peak, higher at moderate demand, closer to an inverted U), which a line
+can't capture and which would understate the value of a plant-specific curve.
+This version bins by demand and takes the mean per bin instead, a non-parametric,
+regime-based fit that makes no assumption about the curve's shape.
 
-指标: 样本外 MAE + 样本外 R² (相对于常数基线)。
+Metrics: out-of-sample MAE and out-of-sample R² (relative to the constant baseline).
 """
 import glob
 import os
@@ -33,18 +40,22 @@ import matplotlib.pyplot as plt
 CACHE_DIR = str(Path(__file__).resolve().parent / "nemosis_cache")
 DUIDS = ["BW01", "BW02", "ER01", "ER02"]
 COLS = ["DUID", "INTERVAL_DATETIME", "TOTALDEMAND", "RESERVE_MARGIN_MW", "WEIGHTED_AVG_PRICE"]
-N_BINS = 8  # 训练集每台机组约4000行, 8箱 => 每箱约500个点, 够稳定又不至于太粗
-MIN_ROWS_PER_FOLD = 50  # 单个 DUID 在训练集/测试集里少于这个行数, 该折直接跳过
+N_BINS = 8  # ~4000 training rows per unit -> ~500 points per bin, stable without being too coarse
+MIN_ROWS_PER_FOLD = 50  # skip a fold if a DUID has fewer rows than this in train or test
 
 
 def load_windows():
-    """自动发现 CACHE_DIR 下所有 scarcity_curve_data_*.parquet (不再写死3个窗口) --
-    跑过 fetch_monthly_bids.py 之后, 新拉的月份会自动被这里捡起来, 折数会跟着变多。
-    空窗口 (比如刚结束没几天、AEMO 还没归档完的当月数据) 会被跳过, 不然 corrcoef 遇到
-    空数组会直接崩 (numpy 对长度0/1的输入有个诡异的内部报错)。"""
+    """Auto-discovers every scarcity_curve_data_*.parquet under CACHE_DIR.
+
+    Windows are no longer hardcoded: after running fetch_monthly_bids.py, newly
+    pulled months are picked up automatically and the fold count grows with them.
+    Empty windows (e.g. the current month, not yet fully archived by AEMO) are
+    skipped, since corrcoef crashes on an empty array (a known numpy quirk with
+    length-0/1 inputs).
+    """
     paths = sorted(glob.glob(f"{CACHE_DIR}/scarcity_curve_data_*.parquet"))
     if not paths:
-        raise FileNotFoundError(f"没在 {CACHE_DIR} 找到 scarcity_curve_data_*.parquet, 先跑 scarcity_curve.py")
+        raise FileNotFoundError(f"No scarcity_curve_data_*.parquet found under {CACHE_DIR}, run scarcity_curve.py first")
     data = {}
     skipped_empty = []
     for path in paths:
@@ -55,14 +66,18 @@ def load_windows():
             continue
         d["window"] = label
         data[label] = d
-    print(f"发现 {len(data)} 个窗口: {list(data.keys())}")
+    print(f"Found {len(data)} windows: {list(data.keys())}")
     if skipped_empty:
-        print(f"跳过 {len(skipped_empty)} 个空窗口 (可能是数据还没归档完): {skipped_empty}")
+        print(f"Skipped {len(skipped_empty)} empty windows (likely not fully archived yet): {skipped_empty}")
     return data
 
 
 def fit_binned(x, y, n_bins=N_BINS):
-    """按 x (demand) 的分位数切箱, 每箱取 y 的均值 -- 非参数, 能拟合任意形状 (包括倒U型)。"""
+    """Bins x (demand) by quantile and takes the mean of y per bin.
+
+    Non-parametric: makes no assumption about the curve's shape, so it can fit a
+    non-monotonic relationship (e.g. an inverted U).
+    """
     x, y = np.asarray(x), np.asarray(y)
     edges = np.unique(np.quantile(x, np.linspace(0, 1, n_bins + 1)))
     interior_edges = edges[1:-1]
@@ -76,35 +91,36 @@ def fit_binned(x, y, n_bins=N_BINS):
 
 
 def predict_binned(x, interior_edges, bin_means):
-    """用 fit_binned 算出来的分箱结果去预测新的 x 值对应的 y。
+    """Predicts y for new x values using the bins from fit_binned.
 
-    参数:
-        x: 需要预测的 demand 数组
-        interior_edges: fit_binned 返回的分箱边界
-        bin_means: fit_binned 返回的每箱均值
+    Args:
+        x: array of demand values to predict for
+        interior_edges: bin boundaries returned by fit_binned
+        bin_means: per-bin means returned by fit_binned
 
-    返回:
-        每个 x 对应的预测值 (落在哪箱就用哪箱的均值)
+    Returns:
+        Predicted value for each x (the mean of whichever bin it falls into).
     """
     bin_idx = np.searchsorted(interior_edges, np.asarray(x), side="right")
     return bin_means[bin_idx]
 
 
 def mae(actual, pred):
-    """算平均绝对误差 (预测值跟真实值差多少, 取绝对值再平均), 单位跟原始数据一样 ($/MWh)。"""
+    """Mean absolute error between predicted and actual values, in the same units as the data ($/MWh)."""
     return float(np.mean(np.abs(actual - pred)))
 
 
 def r2_vs_baseline(actual, pred, baseline_pred):
-    """算一个模型比"只预测基线值"好多少 (R², 1表示完美预测, 0表示跟基线一样烂, 负数表示比基线还烂)。
+    """R² of a model relative to a baseline: 1 is a perfect fit, 0 means no better
+    than the baseline, negative means worse than the baseline.
 
-    参数:
-        actual: 真实值
-        pred: 模型的预测值
-        baseline_pred: 对照组的预测值 (比如直接猜历史均价)
+    Args:
+        actual: true values
+        pred: model's predicted values
+        baseline_pred: baseline's predicted values (e.g. the historical average)
 
-    返回:
-        R² 分数, 越接近1越好
+    Returns:
+        R² score, closer to 1 is better.
     """
     ss_res = np.sum((actual - pred) ** 2)
     ss_tot = np.sum((actual - baseline_pred) ** 2)
@@ -112,42 +128,44 @@ def r2_vs_baseline(actual, pred, baseline_pred):
 
 
 def run_backtest():
-    """跑一遍完整的留一法交叉验证, 每个窗口轮流当一次测试集, 其余窗口拿来训练。
+    """Runs the full leave-one-window-out cross-validation: each window is held
+    out as the test set once, with the rest used for training.
 
-    每一折都会对比三种预测方式: 分机组建模 (plant-specific)、四台机组混一起建模
-    (pooled naive)、直接猜训练集历史均价 (constant, 最起码的对照组), 记录每种方式
-    在没见过的测试窗口上预测得准不准。
+    Each fold compares three predictors: plant-specific, pooled naive, and a
+    constant baseline (the training-period average), scored on how well they
+    predict the held-out window.
 
-    返回:
-        results: 每一折 (测试窗口 x 机组) 一行的明细表 (DataFrame)
-        example_fold: 挑一折 BW01 的数据留着画图用, 方便直观看预测曲线跟真实曲线差多少
+    Returns:
+        results: one row per (test window, DUID) fold, as a DataFrame.
+        example_fold: BW01's data from one fold, kept for plotting predicted vs. actual.
     """
     data = load_windows()
     all_labels = list(data.keys())
     rows = []
-    example_fold = None  # 留一份细节数据用来画图
+    example_fold = None  # keep one fold's detail for the example chart
 
     for test_label in all_labels:
         train_labels = [l for l in all_labels if l != test_label]
         train_df = pd.concat([data[l] for l in train_labels], ignore_index=True)
         test_df = data[test_label]
 
-        # Model B: pooled -- 四台机组混在一起按需求分箱 (naive "通用稀缺alpha" 做法)
+        # Model B: pooled, all four units binned together (the naive "one scarcity curve fits all" approach)
         edges_pool, means_pool = fit_binned(train_df["TOTALDEMAND"], train_df["WEIGHTED_AVG_PRICE"])
 
         for duid in DUIDS:
             train_sub = train_df[train_df["DUID"] == duid]
             test_sub = test_df[test_df["DUID"] == duid].sort_values("INTERVAL_DATETIME")
 
-            # 防御性检查: 单个 DUID 在某个窗口里数据点太少 (比如那个月只抓到几天) 会让
-            # corrcoef/分箱失去意义, 甚至让 numpy 内部崩掉 -- 直接跳过这一折, 不硬凑结果
+            # Skip a fold if a DUID has too few points in train or test (e.g. a
+            # month with only a few days of data) -- too few to be meaningful,
+            # and can crash corrcoef/binning outright.
             if len(train_sub) < MIN_ROWS_PER_FOLD or len(test_sub) < MIN_ROWS_PER_FOLD:
-                print(f"跳过 {test_label}/{duid}: 训练集{len(train_sub)}行, 测试集{len(test_sub)}行, 太少了")
+                print(f"Skipping {test_label}/{duid}: {len(train_sub)} train rows, {len(test_sub)} test rows, too few")
                 continue
 
             # Model A: plant-specific
             edges_a, means_a = fit_binned(train_sub["TOTALDEMAND"], train_sub["WEIGHTED_AVG_PRICE"])
-            # Baseline: 训练集里这台机组的历史均价 (常数预测)
+            # Baseline: this DUID's training-period average price (constant prediction)
             const_pred_value = train_sub["WEIGHTED_AVG_PRICE"].mean()
 
             actual = test_sub["WEIGHTED_AVG_PRICE"].to_numpy()
@@ -156,8 +174,10 @@ def run_backtest():
             pred_b = predict_binned(demand, edges_pool, means_pool)
             pred_const = np.full_like(actual, const_pred_value)
 
-            # 方向性检验: 训练集里 demand-price 的相关方向, 是否跟测试窗口里真实方向一致
-            # (分箱模型没有单一"斜率", 用训练/测试各自的 corr 符号做对比, 纯描述性, 不参与预测)
+            # Directional check: does the sign of the demand-price relationship
+            # learned in training match the sign actually observed in the held-out
+            # window? (A binned model has no single "slope", so this compares
+            # correlation signs on train vs. test; descriptive only, not used in prediction.)
             train_corr = np.corrcoef(train_sub["TOTALDEMAND"], train_sub["WEIGHTED_AVG_PRICE"])[0, 1]
             train_pool_corr = np.corrcoef(train_df["TOTALDEMAND"], train_df["WEIGHTED_AVG_PRICE"])[0, 1]
             test_corr = np.corrcoef(demand, actual)[0, 1]
@@ -187,22 +207,23 @@ def run_backtest():
 
 
 def summarize(results):
-    """把 run_backtest 跑出来的明细表打印成几张汇总表, 方便看整体结论。
+    """Prints run_backtest's results as a few summary tables.
 
-    打印内容依次是: 每一折的明细、按机组汇总 (分机组建模比混合建模好多少)、
-    全局平均、以及"训练集学到的方向是否跟测试集真实方向一致"的比例。
+    Prints, in order: per-fold detail, per-DUID aggregates (how much better
+    plant-specific is than pooled), the global average, and the rate at which
+    the direction learned in training matched the direction seen in testing.
 
-    参数:
-        results: run_backtest 返回的明细 DataFrame
+    Args:
+        results: the detail DataFrame returned by run_backtest
 
-    返回:
-        按机组汇总后的 DataFrame
+    Returns:
+        The per-DUID aggregate DataFrame.
     """
-    print("=== 每折 (test_window x DUID) 明细 ===")
+    print("=== Per-fold (test_window x DUID) detail ===")
     print(results.round(2).to_string(index=False))
 
     n_windows = results["test_window"].nunique()
-    print(f"\n=== 按 DUID 汇总 ({n_windows}折平均) ===")
+    print(f"\n=== Per-DUID aggregate ({n_windows} folds) ===")
     agg = results.groupby("DUID").agg(
         mae_constant=("mae_constant", "mean"),
         mae_pooled_naive=("mae_pooled_naive", "mean"),
@@ -217,24 +238,24 @@ def summarize(results):
     ).round(1)
     print(agg.to_string())
 
-    print(f"\n=== 全局平均 (跨4台机组 x {n_windows}折, n={len(results)}) ===")
+    print(f"\n=== Global average (4 DUIDs x {n_windows} folds, n={len(results)}) ===")
     overall = results[[
         "mae_constant", "mae_pooled_naive", "mae_plant_specific",
         "r2_pooled_vs_constant", "r2_plant_specific_vs_constant",
     ]].mean().round(2)
     print(overall.to_string())
-    print(f"\n方向性 (训练集 demand-price 相关符号 是否匹配 测试窗口真实符号):")
-    print(f"  plant-specific 模型: {results['plant_specific_sign_matches_test'].mean()*100:.0f}% 的折匹配")
-    print(f"  pooled naive 模型:   {results['pooled_sign_matches_test'].mean()*100:.0f}% 的折匹配")
+    print(f"\nDirection match (training-set demand-price correlation sign vs. test-window actual sign):")
+    print(f"  plant-specific model: {results['plant_specific_sign_matches_test'].mean()*100:.0f}% of folds")
+    print(f"  pooled naive model:   {results['pooled_sign_matches_test'].mean()*100:.0f}% of folds")
 
     return agg
 
 
 def plot_example(example_fold):
-    """画一张图, 对比某一折里 BW01 真实报价曲线和两种模型的预测曲线, 存成 PNG。
+    """Plots BW01's real bid price against both models' predictions for one fold, saved as a PNG.
 
-    参数:
-        example_fold: run_backtest 留下来的那份示例数据, 如果是 None 就什么都不做
+    Args:
+        example_fold: the sample data kept by run_backtest; does nothing if None.
     """
     if example_fold is None:
         return
@@ -254,12 +275,12 @@ def plot_example(example_fold):
     plt.tight_layout()
     plt.savefig("backtest_example_bw01_duckcurve.png", dpi=150)
     plt.close()
-    print("\n已保存示例图: backtest_example_bw01_duckcurve.png")
+    print("\nSaved example chart: backtest_example_bw01_duckcurve.png")
 
 
 if __name__ == "__main__":
     results, example_fold = run_backtest()
     results.to_csv("backtest_results.csv", index=False)
-    print("已保存明细: backtest_results.csv\n")
+    print("Saved detail: backtest_results.csv\n")
     summarize(results)
     plot_example(example_fold)

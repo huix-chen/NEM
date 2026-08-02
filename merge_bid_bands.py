@@ -1,7 +1,8 @@
 """
-把 BIDDAYOFFER_D (每日价格阶梯) 和 BIDPEROFFER_D (每5分钟数量阶梯) 合并成
-每台机组每个 dispatch interval 的完整 10 档报价表 (价格 x 数量)。
-用的是 fetch_real_bids_nemosis.py 已经跑过并缓存好的数据，这里直接复用缓存，不会重新下载。
+Merges BIDDAYOFFER_D (daily price ladder) with BIDPEROFFER_D (5-minute volume
+ladder) into one full 10-band price x volume table per DUID per dispatch
+interval. Reuses the cache already populated by fetch_real_bids_nemosis.py, so
+nothing gets re-downloaded.
 """
 import pandas as pd
 from nemosis import dynamic_data_compiler
@@ -31,10 +32,10 @@ print(volume_bands.head(3))
 PRICE_COLS = [f"PRICEBAND{i}" for i in range(1, 11)]
 VOL_COLS = [f"BANDAVAIL{i}" for i in range(1, 11)]
 
-# BIDDAYOFFER_D 的价格阶梯是按天设的 (SETTLEMENTDATE = 交易日)，
-# BIDPEROFFER_D 的数量阶梯是按 5 分钟 interval 设的。
-# 用 DUID + 交易日 把两者对齐: 同一天里这台机组的10档价格保持不变，
-# 但每个 interval 各档能卖的量会变。
+# BIDDAYOFFER_D's price ladder is set per trading day (SETTLEMENTDATE); BIDPEROFFER_D's
+# volume ladder is set per 5-minute interval. Join on DUID + trading date: a unit's
+# 10 price bands stay fixed within a day, while volume per band can change interval
+# to interval.
 price_bands = price_bands.copy()
 price_bands["TRADE_DATE"] = pd.to_datetime(price_bands["SETTLEMENTDATE"]).dt.date
 
@@ -51,10 +52,11 @@ merged = volume_bands.merge(
 print("\n=== merged shape ===", merged.shape)
 print(merged[["DUID", "TRADE_DATE"] + PRICE_COLS[:3] + VOL_COLS[:3]].head(10))
 
-# 看看同一台机组，一周里价格阶梯变了没有 (哪怕只看 PRICEBAND1/10 两端)
-print("\n=== 每台机组每天的 PRICEBAND1 / PRICEBAND10 (看报价有没有随时间变化) ===")
+# Sanity check: did this unit's price ladder change at all over the week (looking
+# at just the two endpoints, PRICEBAND1/10)?
+print("\n=== PRICEBAND1 / PRICEBAND10 per DUID per day ===")
 daily = price_bands.groupby(["DUID", "TRADE_DATE"])[["PRICEBAND1", "PRICEBAND10"]].first()
 print(daily)
 
 merged.to_feather("./nemosis_cache/merged_bid_bands_202505_week1.feather")
-print("\n已保存合并结果到 ./nemosis_cache/merged_bid_bands_202505_week1.feather")
+print("\nSaved: ./nemosis_cache/merged_bid_bands_202505_week1.feather")

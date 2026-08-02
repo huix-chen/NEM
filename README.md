@@ -8,7 +8,7 @@
 
 NSW1 recorded 137 price spikes above $1,000/MWh in 2023. 90% of them hit in one two-hour window: 5-6pm. That's the evening ramp of the duck curve.
 
-We tested the standard assumption that generators price this window on scarcity: price rises as reserve margin falls. Across three independent real weeks, that assumption fails. Bayswater's two units price *against* demand instead: cheaper at the actual peak, more expensive when demand is only moderate. Eraring's units show a much weaker, less stable version of the same pattern.
+I tested the standard assumption that generators price this window on scarcity: price rises as reserve margin falls. Across three independent real weeks, that assumption fails. Bayswater's two units price *against* demand instead: cheaper at the actual peak, more expensive when demand is only moderate. Eraring's units show a much weaker, less stable version of the same pattern.
 
 **Recommendation:** replace generic scarcity-alpha assumptions with plant-specific, demand-indexed bidding curves estimated from real bid data, and validate before using in any policy or investment scenario.
 
@@ -28,9 +28,9 @@ In 2023, NSW1 traded mostly in the $50-150/MWh range. But price broke $1,000/MWh
 - **Retailers and consumers absorb the cost.** A handful of 5-6pm intervals a year can dominate a retailer's wholesale cost base and flow through to tariffs.
 - **The fleet covering this window is shrinking.** Bayswater and Eraring, the two stations behind every DUID in this analysis, hold close to 3,000 MW of NSW1 capacity. Eraring is on a public retirement timeline. Storage, peakers, and demand response will be sized against models of how this fleet behaves under stress. If those models assume textbook scarcity pricing and the real fleet doesn't bid that way, the resulting investment signals will be wrong exactly when it matters most.
 
-## 3. What We Recommend
+## 3. What I Recommend
 
-We pulled real `BIDDAYOFFER_D`/`BIDPEROFFER_D` bids for Bayswater (BW01, BW02) and Eraring (ER01, ER02), plus real AEMO reserve-margin data, across three real weeks chosen to stress-test the scarcity assumption:
+I pulled real `BIDDAYOFFER_D`/`BIDPEROFFER_D` bids for Bayswater (BW01, BW02) and Eraring (ER01, ER02), plus real AEMO reserve-margin data, across three real weeks chosen to stress-test the scarcity assumption:
 
 | Window | What it represents | Reserve margin range |
 |---|---|---|
@@ -70,7 +70,7 @@ A demand-indexed, plant-specific model should improve forecast accuracy exactly 
 
 The plan was to validate against a real AEMO Market Price Cap or Cumulative Price Threshold event. NSW1 has triggered Administered Pricing only once, May 8 to 15, 2024, and that window sits inside the exact gap where AEMO's bid archive has no data. No bid data exists to test against it.
 
-Instead we ran a leave-one-month-out backtest on 23 independent real months (Aug 2024 to Jun 2026). Each month is held out in turn while the rest train the model. Two models, both fit on demand-binned average bid price, are compared: one curve per unit versus one curve pooled across all four units.
+Instead I ran a leave-one-month-out backtest on 23 independent real months (Aug 2024 to Jun 2026). Each month is held out in turn while the rest train the model. Two models, both fit on demand-binned average bid price, are compared: one curve per unit versus one curve pooled across all four units.
 
 Results across 92 held-out unit-months:
 - Direction (price rising or falling with demand) matched the held-out month 93% of the time.
@@ -98,7 +98,7 @@ All figures come from real AEMO data pulled via [NEMOSIS](https://github.com/UNS
 
 **Data availability:** `BIDDAYOFFER_D`/`BIDPEROFFER_D` are missing from AEMO's archive between March 2021 and July 2024. Real 2023 bid data doesn't exist, so the bidding-behavior analysis and backtest use real months from August 2024 onward instead. Exhibit 1 uses 2023 demand/price data directly, which has no such gap.
 
-**Per-interval reconstruction:** `BIDPEROFFER_D` restates every remaining interval each time a unit rebids intraday, so a naive join keeps superseded rows. We keep only the most recent rebid actually in effect (`OFFERDATE <= INTERVAL_DATETIME`, latest wins) before computing each unit's weighted-average bid price per interval.
+**Per-interval reconstruction:** `BIDPEROFFER_D` restates every remaining interval each time a unit rebids intraday, so a naive join keeps superseded rows. I keep only the most recent rebid actually in effect (`OFFERDATE <= INTERVAL_DATETIME`, latest wins) before computing each unit's weighted-average bid price per interval.
 
 ## Repository Structure
 

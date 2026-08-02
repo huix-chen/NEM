@@ -1,19 +1,24 @@
 """
-把 scarcity_curve.py 里的 run_window 按月循环跑一遍, 覆盖 2024-08 (AEMO 报价数据缺失区间
-结束) 之后所有可用月份, 每个月生成一个独立的 scarcity_curve_data_monthly_YYYYMM.csv。
+Loops scarcity_curve.py's run_window month by month, covering every available
+month from 2024-08 (the end of the AEMO bid-data gap) onward, writing one
+scarcity_curve_data_monthly_YYYYMM.parquet per month.
 
-目的: backtest_holdout.py 之前只能用 3 个人工挑选的 7 天窗口做留一法交叉验证, 独立折数
-太少 (n=3), 结论的置信度很低。这个脚本把独立折数从 3 提到十几/二十几个真实月份, 让回测
-不再依赖挑窗口的运气。backtest_holdout.py 会自动发现新生成的 scarcity_curve_data_*.csv,
-不需要改回测脚本。
+Why: backtest_holdout.py originally had only 3 hand-picked 7-day windows to
+cross-validate against, too few independent folds (n=3) for a confident result.
+This script raises the fold count from 3 to a dozen-plus real months, so the
+backtest no longer depends on which windows happened to get picked.
+backtest_holdout.py auto-discovers new scarcity_curve_data_*.parquet files, so
+it needs no changes.
 
-⚠️ 必须在有网络访问 nemweb.com.au 权限的机器上跑 (sandbox 里跑不了)。
-⚠️ 单月 BIDPEROFFER_D 压缩后约 0.5-1.5GB, 全部 ~24 个月跑下来可能占用 10GB+ 磁盘、
-   耗时几十分钟到几小时。脚本按月落盘、可断点续跑 (已存在的月份会跳过)。
+Requires network access to nemweb.com.au (won't run in this sandbox).
+A single month of BIDPEROFFER_D is about 0.5-1.5GB compressed; pulling all ~24
+months can use 10GB+ of disk and take tens of minutes to a few hours. Each month
+is saved as it completes and already-saved months are skipped, so the run is
+resumable.
 
-用法:
-    python fetch_monthly_bids.py                  # 默认 2024-08 ~ 上个月
-    python fetch_monthly_bids.py 2024-08 2025-06   # 自定义范围 (含端点)
+Usage:
+    python fetch_monthly_bids.py                  # default: 2024-08 to last month
+    python fetch_monthly_bids.py 2024-08 2025-06   # custom range (inclusive)
 """
 import os
 import sys
@@ -22,24 +27,25 @@ from pathlib import Path
 
 import scarcity_curve
 
-# 用脚本自身所在目录算 nemosis_cache 的路径, 不依赖运行时的工作目录 (cwd) --
-# scarcity_curve.py 里原本用的是相对路径 "./nemosis_cache", 谁调用就以谁的 cwd 为准,
-# 从 IDE 的 Run 按钮启动时 cwd 往往就是脚本所在目录, 但不能保证每次都一样,
-# 之前就因为这个报过 "raw_data_location does not exist"。
+# Resolved relative to this script's own directory, not the process's working
+# directory. scarcity_curve.py originally used the relative path "./nemosis_cache",
+# which resolves against whatever cwd the caller happens to have; launching from
+# an IDE's Run button doesn't always give the same cwd as a terminal `cd`, which
+# previously caused a "raw_data_location does not exist" failure.
 RAW_DATA_CACHE = str(Path(__file__).resolve().parent / "nemosis_cache")
 scarcity_curve.RAW_DATA_CACHE = RAW_DATA_CACHE
 run_window = scarcity_curve.run_window
 
 
 def month_range(start_ym, end_ym):
-    """从起始年月一直数到结束年月 (含两端), 每次吐出一个 (年, 月) 元组。
+    """Yields (year, month) tuples from start_ym to end_ym inclusive.
 
-    参数:
-        start_ym: 起始 (年, 月), 比如 (2024, 8)
-        end_ym: 结束 (年, 月), 比如 (2025, 6)
+    Args:
+        start_ym: starting (year, month), e.g. (2024, 8)
+        end_ym: ending (year, month), e.g. (2025, 6)
 
-    返回:
-        一个生成器, 依次产出 (年, 月)
+    Returns:
+        A generator yielding (year, month) tuples in order.
     """
     y, m = start_ym
     while (y, m) <= end_ym:
@@ -48,16 +54,17 @@ def month_range(start_ym, end_ym):
 
 
 def default_end_month():
-    """算出默认要抓到哪个月为止: 今天所在月份的上一个月 (当月数据往往还没归档完整)。"""
+    """Default end month: the month before the current one (the current month is often not fully archived yet)."""
     today = date.today()
     return (today.year, today.month - 1) if today.month > 1 else (today.year - 1, 12)
 
 
 def main():
-    """主流程: 按命令行参数或默认范围, 一个月一个月地调用 run_window 抓数据并存盘。
+    """Pulls one month at a time, in order, from a command-line range or the default range.
 
-    已经抓过的月份 (对应的输出文件已存在) 会自动跳过, 支持中断后重新运行接着抓。
-    某个月失败了 (比如那个月数据本来就不存在) 不会中断整体流程, 会跳过继续抓下一个月。
+    Months that already have an output file are skipped, so an interrupted run
+    can be resumed by rerunning. A single month failing (e.g. no data exists for
+    it) doesn't stop the run; it's logged and the loop moves on.
     """
     if len(sys.argv) >= 3:
         start_ym = tuple(int(x) for x in sys.argv[1].split("-"))
@@ -66,14 +73,14 @@ def main():
         start_ym = (2024, 8)
         end_ym = default_end_month()
 
-    print(f"拉取范围: {start_ym[0]}-{start_ym[1]:02d} ~ {end_ym[0]}-{end_ym[1]:02d}")
+    print(f"Pulling range: {start_ym[0]}-{start_ym[1]:02d} ~ {end_ym[0]}-{end_ym[1]:02d}")
 
     ok, skipped, failed = [], [], []
     for y, m in month_range(start_ym, end_ym):
         label = f"monthly_{y}{m:02d}"
         out_path = f"{RAW_DATA_CACHE}/scarcity_curve_data_{label}.parquet"
         if os.path.exists(out_path):
-            print(f"跳过 {label} (已存在 {out_path})")
+            print(f"Skipping {label} (already exists: {out_path})")
             skipped.append(label)
             continue
 
@@ -85,13 +92,13 @@ def main():
             run_window(start_time, end_time, label)
             ok.append(label)
         except Exception as e:
-            print(f"!! {label} 失败, 跳过: {e}")
+            print(f"!! {label} failed, skipping: {e}")
             failed.append(label)
 
-    print(f"\n完成: {len(ok)} 个新月份, 跳过 {len(skipped)} 个已存在, {len(failed)} 个失败")
+    print(f"\nDone: {len(ok)} new months, {len(skipped)} already existed, {len(failed)} failed")
     if failed:
-        print(f"失败的月份 (可能是该月数据本来就不存在, 或网络问题): {failed}")
-    print("\n现在可以直接跑 backtest_holdout.py, 它会自动发现所有月份文件。")
+        print(f"Failed months (data may genuinely not exist for these, or it was a network issue): {failed}")
+    print("\nYou can now run backtest_holdout.py; it will auto-discover all monthly files.")
 
 
 if __name__ == "__main__":

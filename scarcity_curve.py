@@ -1,10 +1,10 @@
 """
-用真实报价数据 (BIDPEROFFER_D + BIDDAYOFFER_D) 和真实 AEMO 备用容量数据
-(DISPATCHREGIONSUM.AVAILABLEGENERATION) 拟合 "备用容量越紧张,机组报价越往高价档集中"
-这条真实曲线,用来替代 nem_mvp.py 里手编的 alpha 公式。
+Fits the real relationship between bid price and reserve margin
+(DISPATCHREGIONSUM.AVAILABLEGENERATION - TOTALDEMAND) from real BIDPEROFFER_D /
+BIDDAYOFFER_D data, replacing the hand-tuned alpha formula in nem_mvp.py.
 
-跟第一版的区别: 参数化成函数，可以对多个真实尖峰窗口分别跑，
-而不是只跑一个"风平浪静"的默认周。
+Parameterized as a function so it can run against several real windows, not just
+one fixed default week.
 """
 import sys
 import numpy as np
@@ -18,26 +18,22 @@ VOL_COLS = [f"BANDAVAIL{i}" for i in range(1, 11)]
 
 
 def run_window(start_time, end_time, label):
-    """处理一段真实时间窗口的数据, 算出每台机组每个5分钟的加权平均报价, 存成一个 parquet 文件。
+    """Builds the weighted-average bid price series for one real time window and
+    saves it as a parquet file.
 
-    做的事情, 按顺序:
-    1. 从 AEMO 拉这段时间 NSW1 的真实需求和可用发电量, 算出备用容量。
-    2. 拉这段时间四台机组 (Bayswater/Eraring) 的真实报价 (10档价格 + 每档数量)。
-    3. 只保留每个时间点最新生效的报价 (机组盘中会反复改价, 要用最后一次)。
-    4. 用价格和数量算出每个时间点的成交量加权平均报价。
-    5. 把报价数据和需求/备用容量数据按时间对齐、合并。
-    6. 打印一下每台机组"报价 vs 备用容量"的相关系数, 方便肉眼检查。
-    7. 存成 parquet 文件, 文件名带上 label, 供后续脚本 (比如 backtest_holdout.py) 使用。
+    Pulls real NSW1 demand/availability and real bid ladders for the four units,
+    keeps only the latest live rebid in effect at each interval, computes each
+    unit's volume-weighted average bid price, and joins it to reserve margin.
 
-    参数:
-        start_time: 起始时间, 格式 "YYYY/MM/DD HH:MM:SS"
-        end_time: 结束时间, 格式同上
-        label: 这段窗口的名字, 会出现在存盘文件名里, 比如 "monthly_202408"
+    Args:
+        start_time: window start, "YYYY/MM/DD HH:MM:SS"
+        end_time: window end, same format
+        label: name for this window, used in the output filename (e.g. "monthly_202408")
 
-    返回:
-        合并好的 DataFrame (跟存盘的内容一样)
+    Returns:
+        The merged DataFrame (same content as what gets saved).
     """
-    print(f"\n{'='*70}\n窗口: {label} ({start_time} ~ {end_time})\n{'='*70}")
+    print(f"\n{'='*70}\nWindow: {label} ({start_time} ~ {end_time})\n{'='*70}")
 
     region_summary = dynamic_data_compiler(
         start_time, end_time, "DISPATCHREGIONSUM", RAW_DATA_CACHE,
@@ -48,7 +44,7 @@ def run_window(start_time, end_time, label):
     region_summary["RESERVE_MARGIN_MW"] = (
         region_summary["AVAILABLEGENERATION"] - region_summary["TOTALDEMAND"]
     )
-    print("=== NSW1 reserve margin (真实, AVAILABLEGENERATION - TOTALDEMAND) ===")
+    print("=== NSW1 reserve margin (real, AVAILABLEGENERATION - TOTALDEMAND) ===")
     print(region_summary[["TOTALDEMAND", "AVAILABLEGENERATION", "RESERVE_MARGIN_MW"]].describe())
 
     price_bands = dynamic_data_compiler(
@@ -65,6 +61,8 @@ def run_window(start_time, end_time, label):
     volume_bands["INTERVAL_DATETIME"] = pd.to_datetime(volume_bands["INTERVAL_DATETIME"])
     volume_bands["OFFERDATE"] = pd.to_datetime(volume_bands["OFFERDATE"])
 
+    # A unit can rebid intraday; BIDPEROFFER_D restates every remaining interval
+    # each time it does. Keep only the latest rebid actually in effect per interval.
     volume_bands = volume_bands[volume_bands["OFFERDATE"] <= volume_bands["INTERVAL_DATETIME"]]
     volume_bands = volume_bands.sort_values("OFFERDATE").drop_duplicates(
         subset=["DUID", "INTERVAL_DATETIME"], keep="last"
@@ -92,14 +90,14 @@ def run_window(start_time, end_time, label):
     scarcity = scarcity.dropna(subset=["WEIGHTED_AVG_PRICE"])
 
     print(f"\nrows: {len(scarcity)}")
-    print("\n=== 按 DUID 分组: 报价 vs 备用容量 的相关系数 ===")
+    print("\n=== By DUID: correlation between bid price and reserve margin ===")
     for duid, g in scarcity.groupby("DUID"):
         corr = g["RESERVE_MARGIN_MW"].corr(g["WEIGHTED_AVG_PRICE"])
         print(f"{duid}: n={len(g)}, corr(reserve_margin, weighted_avg_price) = {corr:.3f}")
 
     out_path = f"{RAW_DATA_CACHE}/scarcity_curve_data_{label}.parquet"
     scarcity.to_parquet(out_path, index=False)
-    print(f"\n已保存到 {out_path}")
+    print(f"\nSaved: {out_path}")
     return scarcity
 
 

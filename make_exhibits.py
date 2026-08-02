@@ -1,11 +1,13 @@
 """
-生成 README 用的三张 consulting-style exhibit 图:
-  Exhibit 1: 2023 NSW1 价格尖峰的时间分布 (月份 + 小时) -- 复用 spike_diagnostic.py 的数据
-  Exhibit 2: 2025-11-26 (真实鸭子曲线日) BW01 需求 vs 报价 的时间序列对照
-  Exhibit 3: 三个真实窗口下, 4 台机组 corr(demand, weighted_avg_price) 的对比
+Generates the three consulting-style exhibit charts used in the README:
+  Exhibit 1: 2023 NSW1 price-spike timing distribution (by month + hour), reuses
+             spike_diagnostic.py's data
+  Exhibit 2: Nov 26 2025 (real duck-curve day) demand vs. BW01 bid price, side by side
+  Exhibit 3: corr(demand, weighted_avg_price) across 4 units, compared across three real windows
 
-配色取自内部 dataviz skill 的已验证默认 palette (references/palette.md),
-不额外调用 validator -- 这里用的 hex 是文档里原样给出的、已经过验证的值。
+Colors come from the internal dataviz skill's validated default palette
+(references/palette.md); the validator isn't called again here, since these hex
+values are copied as-is from the already-validated doc.
 """
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -36,11 +38,11 @@ mpl.rcParams.update({
 
 
 def clean_axes(ax, keep_bottom=True):
-    """去掉图表的上/右/左边框, 只留浅色网格线, 让图表看起来更干净 (consulting 风格)。
+    """Strips the top/right/left spines and leaves only a light grid, for a cleaner consulting-style chart.
 
-    参数:
-        ax: matplotlib 的坐标轴对象
-        keep_bottom: 是否保留底部边框, 默认保留
+    Args:
+        ax: a matplotlib Axes object
+        keep_bottom: whether to keep the bottom spine, default True
     """
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -64,7 +66,7 @@ by_hour = spikes["hour"].value_counts().reindex(range(0, 24), fill_value=0)
 
 fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
 fig.suptitle(
-    "137 price spikes (>$1,000/MWh) in NSW1 in 2023 cluster in the 5–6pm evening ramp — not summer heat",
+    "137 price spikes (>$1,000/MWh) in NSW1 in 2023 cluster in the 5-6pm evening ramp, not summer heat",
     fontsize=12.5, fontweight="bold", x=0.02, ha="left", color=INK,
 )
 
@@ -80,7 +82,7 @@ colors_h = [RED if h in (17, 18) else BLUE for h in by_hour.index]
 axes[1].bar(by_hour.index.astype(str), by_hour.values, color=colors_h, width=0.65, zorder=3)
 axes[1].set_title("By hour of day", fontsize=10.5, color=INK_SECONDARY, loc="left")
 clean_axes(axes[1])
-axes[1].annotate("5–6pm: 123 of 137 spikes\n(90% of all events)",
+axes[1].annotate("5-6pm: 123 of 137 spikes\n(90% of all events)",
                   xy=(17, 69), xytext=(4, 62), fontsize=9, color=RED,
                   arrowprops=dict(arrowstyle="-", color=RED, lw=0.8))
 
@@ -114,10 +116,10 @@ axes[1].axhline(0, color=MUTED, linewidth=0.8, zorder=2)
 axes[1].set_title("BW01 volume-weighted average bid price ($/MWh)", fontsize=10, color=INK_SECONDARY, loc="left")
 clean_axes(axes[1])
 
-axes[1].annotate("9–11am: bids to ~$9,400/MWh\n(demand only ~7,000–9,400 MW)",
+axes[1].annotate("9-11am: bids to ~$9,400/MWh\n(demand only ~7,000-9,400 MW)",
                   xy=(pd.Timestamp("2025-11-26 10:00"), 9397), xytext=(pd.Timestamp("2025-11-26 01:30"), 6500),
                   fontsize=9, color=RED, arrowprops=dict(arrowstyle="-", color=RED, lw=0.8))
-axes[1].annotate("5–8pm: near price floor\n(demand peaks at 10,760 MW)",
+axes[1].annotate("5-8pm: near price floor\n(demand peaks at 10,760 MW)",
                   xy=(pd.Timestamp("2025-11-26 18:00"), -964), xytext=(pd.Timestamp("2025-11-26 19:30"), 3500),
                   fontsize=9, color=RED, arrowprops=dict(arrowstyle="-", color=RED, lw=0.8))
 
