@@ -43,13 +43,13 @@ The naive hypothesis, price rises as margin tightens, failed in all three:
 ![Exhibit 3: correlation by plant](exhibit3_correlation_by_plant.png)
 
 - **Bayswater prices against demand, consistently.** Correlation between demand and its weighted-average bid price runs -0.5 to -0.8 in every window, calm or stressed.
-- **Eraring's pattern is weaker and unstable.** Near zero in the calm week, only turning meaningfully negative under stress. Same fuel, same region, different bidding logic, plausibly tied to its retirement timeline.
+- **Eraring's pattern is weaker and unstable.** Near zero in the calm week, only turning meaningfully negative under stress. Same fuel, same region, different bidding logic. Eraring's retirement date has moved twice during the analysis period; see the note in Phase 2 for a partially tested link.
 
 One day makes the mechanism concrete. On November 26, 2025:
 
 ![Exhibit 2: duck curve day](exhibit2_duckcurve_day.png)
 
-BW01 bid up to a blended ~$9,400/MWh at 9-11am, when demand was only 7,000-9,400 MW. It bid down to the price floor during the day's actual peak of 10,760 MW at 5-8pm. The unit prices low when it wants to guarantee dispatch, and prices its optional capacity high when running isn't necessary. That's self-preservation bidding, not a scarcity markup, and a replacement model needs to capture it per plant, not per fuel type.
+BW01's volume-weighted bid price (the average across all 10 price bands, weighted by offered volume, not the marginal band or the dispatch price) reached ~$9,400/MWh at 9-11am, when demand was only 7,000-9,400 MW: half its 660 MW capacity sat at the price cap, half near the floor. At the day's actual peak of 10,760 MW at 5-8pm, all 660 MW sat at the price floor. The unit prices low when it wants to guarantee dispatch, and prices its optional capacity high when running isn't necessary. That's self-preservation bidding, not a scarcity markup, and a replacement model needs to capture it per plant, not per fuel type. (Across the full month this specific two-band split is the extreme case, not the typical one; see the Appendix for the exact statistic used.)
 
 **Concretely:**
 1. Replace the single "scarcity alpha" parameter with plant-specific curves indexed to demand, estimated from each unit's bid history.
@@ -70,15 +70,15 @@ A demand-indexed, plant-specific model should improve forecast accuracy exactly 
 
 The plan was to validate against a real AEMO Market Price Cap or Cumulative Price Threshold event. NSW1 has triggered Administered Pricing only once, May 8 to 15, 2024, and that window sits inside the exact gap where AEMO's bid archive has no data. No bid data exists to test against it.
 
-Instead I ran a leave-one-month-out backtest on 23 independent real months (Aug 2024 to Jun 2026). Each month is held out in turn while the rest train the model. Two models, both fit on demand-binned average bid price, are compared: one curve per unit versus one curve pooled across all four units.
+Instead I ran a walk-forward backtest on real months from Aug 2024 to Jun 2026. Windows are sorted chronologically and each test month is predicted only from months strictly before it, never from the future. Two models, both fit on demand-binned average bid price, are compared: one curve per unit versus one curve pooled across all four units. An earlier version of this backtest trained on all other months regardless of order, letting later months leak into earlier predictions; that is fixed now.
 
-Results across 92 held-out unit-months:
-- Direction (price rising or falling with demand) matched the held-out month 93% of the time.
-- The pooled curve did worse than just predicting the training-period average price (R² -0.12).
-- The plant-specific curve beat that baseline (R² 0.12) and cut prediction error 11% versus the pooled curve.
-- The gain was small for Bayswater (about 4%) and large for Eraring (15-25%). Pooling lets Bayswater's bigger swings distort Eraring's curve.
+Results across 80 held-out unit-months:
+- The plant-specific curve cut prediction error 12% versus the pooled curve, and beat a constant-average baseline (R² 0.14 vs. 0.01 for pooled). The gain was small for Bayswater (4-7%) and large for Eraring (about 24%). Pooling lets Bayswater's bigger swings distort Eraring's curve. This is the real result of this backtest.
+- Direction (price rising or falling with demand) matched the held-out month 92% of the time, which sounds strong until it's compared against doing nothing. A rule that always predicts "price falls as demand rises", no model, no training, just always guessing the same direction, matches 95% of months, because that's how skewed the real distribution already is. Neither model beats that trivial baseline on direction. Report the MAE result above, not a direction-match percentage, as evidence.
 
-This supports keeping Bayswater and Eraring separate. It does not mean demand alone predicts price well: it explains only about 12% of the variance. Reproduce with `fetch_monthly_bids.py` then `backtest_holdout.py`.
+This supports keeping Bayswater and Eraring separate for predicting price *level*, not direction. Demand alone explains only 12-14% of the variance. Some of that is likely omitted variables I haven't controlled for: reserve margin and demand here are actual outturn values, not the forecasts a unit would have seen when it submitted a day-ahead bid, and neither interconnector flow (QNI/VNI) nor unit-level outage status is in the model yet. Reproduce with `fetch_monthly_bids.py` then `backtest_holdout.py`.
+
+**Open question, not yet confirmed:** Eraring's retirement date moved twice during this window: extended from 2025 to August 2027 in May 2024 (before this data starts), then to April 2029 in January 2026 (inside this window). Eraring's demand-price correlation does weaken after the January 2026 announcement, but at 6 months of post-announcement data the shift isn't statistically significant (p > 0.09), and Bayswater, unrelated to Eraring's retirement, shifted too over the same period. Worth rechecking once more months accumulate; not something I can claim yet.
 
 ---
 
@@ -100,6 +100,10 @@ All figures come from real AEMO data pulled via [NEMOSIS](https://github.com/UNS
 
 **Per-interval reconstruction:** `BIDPEROFFER_D` restates every remaining interval each time a unit rebids intraday, so a naive join keeps superseded rows. I keep only the most recent rebid actually in effect (`OFFERDATE <= INTERVAL_DATETIME`, latest wins) before computing each unit's weighted-average bid price per interval.
 
+**Bid price statistic:** `WEIGHTED_AVG_PRICE` is each unit's 10 price bands averaged and weighted by the volume offered in each band, for that interval. It is not the marginal (highest dispatched) band, and not the actual dispatch price (RRP). A unit can, and does, park most of its capacity at the price floor while holding a smaller slice at the cap; the weighted average reflects that mix, not a single "price" the unit is charging.
+
+**Known limitations:** reserve margin and demand used here are actual outturn values (`DISPATCHREGIONSUM`), not the pre-dispatch forecasts a unit would have had at bid submission time. Interconnector flow (QNI/VNI) and unit-level planned/unplanned outages are not in the model. The backtest's low R² (12-14%, see Phase 2) is consistent with these being real omitted variables, not just noise.
+
 ## Repository Structure
 
 ```
@@ -110,7 +114,7 @@ find_real_spike_days.py       # Scan 2024-08 onward for genuine NSW1 price-spike
 scarcity_curve.py             # Core analysis: real bid price vs. real reserve margin / demand
 make_exhibits.py              # Generates exhibit1/2/3 PNGs used in this README
 fetch_monthly_bids.py         # Phase 2: pull every available real month for the backtest
-backtest_holdout.py           # Phase 2: leave-one-month-out backtest, plant-specific vs. pooled curve
+backtest_holdout.py           # Phase 2: walk-forward backtest, plant-specific vs. pooled curve
 nsw1_2023.csv                 # 2023 NSW1 half-hourly demand & price
 duid_generator_registry.csv   # AEMO generator registration list
 nemosis_cache/                # Cached NEMOSIS downloads + parquet outputs, gitignored, several GB

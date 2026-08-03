@@ -42,6 +42,7 @@ DUIDS = ["BW01", "BW02", "ER01", "ER02"]
 COLS = ["DUID", "INTERVAL_DATETIME", "TOTALDEMAND", "RESERVE_MARGIN_MW", "WEIGHTED_AVG_PRICE"]
 N_BINS = 8  # ~4000 training rows per unit -> ~500 points per bin, stable without being too coarse
 MIN_ROWS_PER_FOLD = 50  # skip a fold if a DUID has fewer rows than this in train or test
+MIN_TRAIN_WINDOWS = 3  # need at least this many earlier months before the first test fold
 
 
 def load_windows():
@@ -128,24 +129,32 @@ def r2_vs_baseline(actual, pred, baseline_pred):
 
 
 def run_backtest():
-    """Runs the full leave-one-window-out cross-validation: each window is held
-    out as the test set once, with the rest used for training.
+    """Runs a walk-forward backtest: windows are sorted chronologically, and each
+    test month is only ever predicted from months strictly before it.
+
+    An earlier version trained on "all other windows" regardless of order, which
+    let later months leak into predictions for earlier ones, an information
+    leak a genuine forecasting use case would never have. Bidding strategy is
+    also not stationary (see the Eraring retirement-negotiation timeline), so
+    predicting the past from the future would flatter the result.
 
     Each fold compares three predictors: plant-specific, pooled naive, and a
-    constant baseline (the training-period average), scored on how well they
-    predict the held-out window.
+    constant baseline (the average of everything trained on so far), scored on
+    how well they predict the held-out month.
 
     Returns:
         results: one row per (test window, DUID) fold, as a DataFrame.
         example_fold: BW01's data from one fold, kept for plotting predicted vs. actual.
     """
     data = load_windows()
-    all_labels = list(data.keys())
+    all_labels = sorted(data.keys())  # "monthly_YYYYMM" sorts chronologically as strings
     rows = []
     example_fold = None  # keep one fold's detail for the example chart
+    last_actual_corr = {}  # per-DUID, the previous month's actual correlation, for the persistence baseline
 
-    for test_label in all_labels:
-        train_labels = [l for l in all_labels if l != test_label]
+    for i in range(MIN_TRAIN_WINDOWS, len(all_labels)):
+        test_label = all_labels[i]
+        train_labels = all_labels[:i]  # only months strictly before the test month
         train_df = pd.concat([data[l] for l in train_labels], ignore_index=True)
         test_df = data[test_label]
 
@@ -181,8 +190,20 @@ def run_backtest():
             train_corr = np.corrcoef(train_sub["TOTALDEMAND"], train_sub["WEIGHTED_AVG_PRICE"])[0, 1]
             train_pool_corr = np.corrcoef(train_df["TOTALDEMAND"], train_df["WEIGHTED_AVG_PRICE"])[0, 1]
             test_corr = np.corrcoef(demand, actual)[0, 1]
-            plant_specific_sign_match = np.sign(train_corr) == np.sign(test_corr)
-            pooled_sign_match = np.sign(train_pool_corr) == np.sign(test_corr)
+            # bool(...) matters: np.sign(...) == np.sign(...) is a numpy.bool_,
+            # and storing numpy.bool_ in an object-dtype column makes
+            # pandas.Series.mean() silently wrong (verified: with pandas 2.3.3 /
+            # numpy 2.2.6, any True in such a column makes .mean() return 1/n
+            # regardless of the real proportion). Plain Python bool avoids it.
+            plant_specific_sign_match = bool(np.sign(train_corr) == np.sign(test_corr))
+            pooled_sign_match = bool(np.sign(train_pool_corr) == np.sign(test_corr))
+
+            # Persistence baseline: predict this month's sign is whatever last
+            # month's actual sign was, no model at all. Context for how much the
+            # model's direction match rate is actually buying you.
+            prev_corr = last_actual_corr.get(duid)
+            persistence_sign_match = bool(np.sign(prev_corr) == np.sign(test_corr)) if prev_corr is not None else np.nan
+            last_actual_corr[duid] = test_corr
 
             rows.append({
                 "test_window": test_label,
@@ -192,6 +213,7 @@ def run_backtest():
                 "test_actual_demand_price_corr": test_corr,
                 "plant_specific_sign_matches_test": plant_specific_sign_match,
                 "pooled_sign_matches_test": pooled_sign_match,
+                "persistence_sign_matches_test": persistence_sign_match,
                 "mae_constant": mae(actual, pred_const),
                 "mae_pooled_naive": mae(actual, pred_b),
                 "mae_plant_specific": mae(actual, pred_a),
@@ -245,8 +267,12 @@ def summarize(results):
     ]].mean().round(2)
     print(overall.to_string())
     print(f"\nDirection match (training-set demand-price correlation sign vs. test-window actual sign):")
-    print(f"  plant-specific model: {results['plant_specific_sign_matches_test'].mean()*100:.0f}% of folds")
-    print(f"  pooled naive model:   {results['pooled_sign_matches_test'].mean()*100:.0f}% of folds")
+    print(f"  plant-specific model:  {results['plant_specific_sign_matches_test'].mean()*100:.0f}% of folds")
+    print(f"  pooled naive model:    {results['pooled_sign_matches_test'].mean()*100:.0f}% of folds")
+    persistence = results["persistence_sign_matches_test"].dropna()
+    print(f"  persistence baseline:  {persistence.mean()*100:.0f}% of folds (predict this month = last month's actual sign, no model at all, n={len(persistence)})")
+    always_negative = (results["test_actual_demand_price_corr"] < 0).mean()
+    print(f"  'always guess negative' baseline: {always_negative*100:.0f}% of folds (context: how skewed the sign distribution already is)")
 
     return agg
 
